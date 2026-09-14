@@ -71,6 +71,16 @@ int main(void)
     bool clock_set = set_sys_clock_khz(BOARD_SYS_CLOCK_KHZ, false);
 
     stdio_init_all();
+
+    /*
+     * Unbuffered stdout. The console echoes with putchar(), which pico_stdio
+     * sends straight to the UART, while printf() and fputs() go through
+     * newlib's buffer and only drain on a newline. Mixing the two reorders
+     * the stream: the prompt, which has no trailing newline, sat in the
+     * buffer and surfaced in the middle of the next line the operator typed.
+     */
+    setvbuf(stdout, NULL, _IONBF, 0);
+
     printf("\nclk_sys=%lu Hz%s\n", (unsigned long)clock_get_hz(clk_sys),
            clock_set ? "" : " (requested rate refused, running at default)");
 

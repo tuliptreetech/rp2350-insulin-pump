@@ -10,7 +10,13 @@ hold its own session, so the suite runs in parallel.
 
 import time
 
+# Two separate ports, mirroring src/board.h: the operator console a person
+# types at, and the machine-readable telemetry stream. Keeping them apart is
+# what stops a 4 Hz log scrolling a command reply out of view - and it means
+# send_expect() searches only actual replies, not a transcript interleaved
+# with telemetry.
 CONSOLE = "tty0"
+TELEMETRY = "tty1"
 
 STEPPER = "/MEM/stepper"
 FLOW = "/MEM/i2c0/slf3x"
@@ -116,12 +122,16 @@ class Pump:
 
     def console(self):
         """
-        Everything the firmware has printed so far.
+        Everything the firmware has printed to the operator console so far.
 
         `get_broker_history` rather than `read_from_broker`: the latter has
         been seen returning nothing for data that was already present.
         """
         return bytes(self.m.get_broker_history(CONSOLE)).decode("utf-8", "replace")
+
+    def telemetry_stream(self):
+        """Everything the firmware has emitted on the telemetry port."""
+        return bytes(self.m.get_broker_history(TELEMETRY)).decode("utf-8", "replace")
 
     def send(self, line):
         self.m.send_to_broker(CONSOLE, (line + "\r").encode())
@@ -168,7 +178,7 @@ class Pump:
         over by the time the host looks.
         """
         records = []
-        for line in self.console().splitlines():
+        for line in self.telemetry_stream().splitlines():
             if line.startswith("t=") and "alarms=" in line:
                 r = _parse_record(line)
                 if r["t"] >= since_ms:

@@ -6,6 +6,8 @@
 #include "app/pump.h"
 #include "board.h"
 #include "drivers/drv8825.h"
+#include "hardware/gpio.h"
+#include "hardware/uart.h"
 #include "pico/stdlib.h"
 
 #define LINE_MAX 48
@@ -144,10 +146,28 @@ static void handle_line(char *line)
     }
 }
 
+/*
+ * The console is a terminal a person types at over a raw serial link, so the
+ * firmware has to echo: nothing else is going to put the typed characters on
+ * their screen. Without it you type blind and cannot see a typo before
+ * committing it - on a port that accepts dose commands, that matters.
+ */
+static void print_prompt(void)
+{
+    fputs("pump> ", stdout);
+    stdio_flush();
+}
+
 void console_init(void)
 {
     s_len = 0;
+
+    /* Telemetry goes out its own port so it cannot scroll this one. */
+    uart_init(BOARD_TELEMETRY_UART, BOARD_TELEMETRY_BAUD);
+    gpio_set_function(BOARD_TELEMETRY_TX_PIN, GPIO_FUNC_UART);
+
     printf("\nRP2350 insulin pump ready. 'help' for commands.\n");
+    print_prompt();
 }
 
 void console_poll(void)
@@ -155,13 +175,32 @@ void console_poll(void)
     int c;
     while ((c = getchar_timeout_us(0)) != PICO_ERROR_TIMEOUT) {
         if (c == '\r' || c == '\n') {
+            fputs("\r\n", stdout);
             s_line[s_len] = '\0';
             handle_line(s_line);
             s_len = 0;
-        } else if (s_len + 1 < sizeof s_line) {
-            s_line[s_len++] = (char)c;
+            print_prompt();
+        } else if (c == '\b' || c == 0x7F) {
+            /* Erase one character on the operator's screen as well as ours. */
+            if (s_len > 0) {
+                s_len--;
+                fputs("\b \b", stdout);
+                stdio_flush();
+            }
+        } else if (c >= 0x20 && c < 0x7F) {
+            /*
+             * Only echo what was actually kept. Echoing a character that
+             * overran the buffer would show the operator a command the
+             * firmware is not holding, which is exactly the kind of quiet
+             * disagreement a dose entry must not have.
+             */
+            if (s_len + 1 < sizeof s_line) {
+                s_line[s_len++] = (char)c;
+                putchar(c);
+                stdio_flush();
+            }
         }
-        /* Overlong lines are truncated rather than split into two commands. */
+        /* Every other control character is ignored rather than echoed. */
     }
 }
 
@@ -170,7 +209,15 @@ void console_telemetry(const safety_inputs_t *in)
     pump_status_t ps;
     pump_get_status(&ps);
 
-    printf("t=%llu mode=%d basal=%u bolus=%u/%u resv=%u total=%llu hour=%u "
+    /*
+     * One record per line on the telemetry port. Formatted into a buffer and
+     * pushed out uart1 rather than printf'd, because printf goes to stdio -
+     * which is the operator's console, and the whole point is to keep this
+     * off it.
+     */
+    char line[256];
+    int n = snprintf(line, sizeof line,
+           "t=%llu mode=%d basal=%u bolus=%u/%u resv=%u total=%llu hour=%u "
            "steps=%lld flow_nlpm=%ld flow_st=%d air=%d psi_m=%ld psi_raw=%u "
            "nfault=%d alarms=0x%03lx\n",
            (unsigned long long)(time_us_64() / 1000),
@@ -183,4 +230,9 @@ void console_telemetry(const safety_inputs_t *in)
            (long)in->pressure.millipsi, in->pressure.raw_counts,
            (int)in->motor_fault,
            (unsigned long)safety_active());
+
+    if (n > 0) {
+        uart_write_blocking(BOARD_TELEMETRY_UART, (const uint8_t *)line,
+                            (n < (int)sizeof line) ? (size_t)n : sizeof line - 1);
+    }
 }

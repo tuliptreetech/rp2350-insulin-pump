@@ -81,16 +81,67 @@ Two design points worth knowing:
   exists to catch: a mechanism uncoupled from the syringe moves no fluid and
   therefore builds no pressure.
 
-## Service console
+## Service console and telemetry
 
-The stdio UART (`uart0`, 115200 8N1, the `tty0` broker in Emerson) carries 4 Hz
-telemetry and accepts commands: `run`, `stop`, `basal <U/hr>`, `bolus <U>`,
-`cancel`, `ack`, `reservoir`, `status`, `help`.
+Two separate serial ports, because they serve two different audiences:
+
+| Port | Broker | Carries |
+| --- | --- | --- |
+| `uart0` (stdio) | `tty0` | the interactive console a person types at |
+| `uart1` (`GP8`) | `tty1` | one machine-readable telemetry record, 4 Hz |
+
+Sharing one port makes both worse — the log scrolls the operator's reply out of
+view, and anything they type lands in the middle of a record a parser is trying
+to read.
+
+The console echoes what you type, supports backspace, and prompts with
+`pump> `. Commands: `run`, `stop`, `basal <U/hr>`, `bolus <U>`, `cancel`,
+`ack`, `reservoir`, `status`, `help`. Anything not fully understood is refused
+rather than guessed at.
 
 This is a **service and test port**, not the patient interface — a shipping
-pump would put dosing behind buttons and a confirmation step. Commands are
-parsed strictly and anything not fully understood is refused rather than
-guessed at.
+pump would put dosing behind buttons and a confirmation step. The patient
+interface is the OLED.
+
+## Driving it by hand
+
+Emerson's web UI at <http://localhost:10314> shows the OLED and gives you a
+terminal on the serial ports, which is the easiest way to drive the pump
+interactively. From the shell:
+
+```sh
+emerson ctl broker tty0 $'status\r'     # type a command
+emerson ctl broker tty0                 # read the console
+emerson ctl broker tty1                 # read telemetry
+emerson ctl action /MEM/i2c0/ssd1306 dump_display
+```
+
+Fault injection is per device; `emerson ctl actions <path>` lists what each
+model can be made to do:
+
+```sh
+emerson ctl action /MEM/stepper inject_fault overcurrent        # MOTOR FAULT
+emerson ctl action /MEM/i2c0/slf3x set_air_in_line true         # AIR IN LINE
+emerson ctl action /MEM/i2c0/slf3x set_crc_error_period 1       # FLOW SENSOR
+emerson ctl action /MEM/adc/abp_pressure set_output_fault open  # PRESS SENSOR
+emerson ctl action /MEM/adc/abp_pressure set_occluded true      # needs a bolus running
+```
+
+Measured latencies at 48 MHz on an idle server, so you know what to expect:
+boot to first telemetry 21 s; a console command and its reply 3-4 s; motor or
+air-in-line alarm 11 s, with the panel banner 16 s later; sensor-fault alarms
+30-60 s (they need ten consecutive bad samples); a 1 U bolus about 90 s; and an
+occlusion roughly 7 minutes, since the line has to build pressure and then hold
+it through the dwell.
+
+The recovery sequence is the most interesting thing to show, and it is quick:
+
+```sh
+emerson ctl action /MEM/stepper inject_fault overcurrent
+emerson ctl broker tty0 $'ack\r'          # refused - the cause is still present
+emerson ctl action /MEM/stepper clear_fault
+emerson ctl broker tty0 $'ack\r'          # clears, and delivery resumes
+```
 
 ## Building
 

@@ -27,6 +27,24 @@
 /* ---- Honeywell ABP line-pressure sensor -------------------------------- */
 #define BOARD_PRESSURE_ADC_CH 1  /* ADC1 == GP27 */
 
+/* ---- Serial ports ----------------------------------------------------- */
+
+/*
+ * Two ports, deliberately separated.
+ *
+ * uart0 is stdio: the interactive service console, where a person types a
+ * command and reads the reply. uart1 carries telemetry only - one
+ * machine-readable record four times a second, for a log or a test harness.
+ *
+ * Sharing one port makes both jobs worse. The log scrolls the operator's
+ * command out of view before they can read the answer, and whatever they type
+ * lands in the middle of a record that a parser is trying to read. They are
+ * two different streams for two different audiences, so they get two pins.
+ */
+#define BOARD_TELEMETRY_UART    uart1
+#define BOARD_TELEMETRY_TX_PIN  8
+#define BOARD_TELEMETRY_BAUD    115200
+
 /* ---- Clocking --------------------------------------------------------- */
 
 /*
