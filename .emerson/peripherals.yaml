@@ -1,127 +1,50 @@
-# Pulled from ghcr.io/tuliptreetech/emerson/rp2350:1.0.15-local (project 'rp2350') by 'emerson peripherals pull'.
-# Edits here take effect the next time you run 'emerson load' - it mounts this
-# file into the container automatically when present at .emerson/peripherals.yaml.
+# Simulated hardware for the RP2350 insulin pump.
 #
-# Available native I2C kinds by controller:
-#   
+# Pulled from ghcr.io/tuliptreetech/emerson/rp2350 by 'emerson peripherals pull'
+# and then trimmed to the four parts this product actually has. Edits here take
+# effect the next time a session is created ('emerson stop && emerson start').
 #
-# To attach a device, add an entry under its controller's device-tree path below:
-#   name: <label>
-#   address: <hex I2C address, e.g. 0x50>
-#   native: <one of the kinds listed above>   (or 'path: <python-file>' for a custom target)
-# Simulated peripherals for this project. Nothing is attached by default --
-# the demo firmware drives none of these -- so every entry below is commented
-# out and serves as a worked example to copy.
+# Board wiring -- keep firmware/board.h in sync with this file:
 #
-# The file must stay a top-level YAML mapping, which is what the `{}` on the
-# next line is for. Delete that line as soon as you uncomment a real entry:
-# a document cannot be both an empty mapping and a mapping with keys.
-{}
+#   i2c0  GP4=SDA, GP5=SCL   SSD1306 OLED @0x3C, Sensirion SLF3S-1300F @0x08
+#   sio   GP2=STEP, GP3=DIR, GP6=nFAULT   DRV8825 driving the syringe lead screw
+#   adc   channel 1 = GP27                Honeywell ABP line-pressure sensor
 
-# Entries are keyed by the *controller's* device-tree path, and the bus that
-# controller sits on decides what an entry needs. `emerson ctl peripherals`
-# prints the authoritative list for this image -- every controller path, and
-# every `native:` kind each one accepts, with a line on what the part is.
-#
-# Every entry has a `name:` (a label, yours to choose) and a `native:` kind.
-# On i2c you may write `path: <python-file>` instead of `native:`, to script
-# a target of your own.
+# == I2C =====================================================================
+/MEM/i2c0:
+  # 128x64 monochrome OLED: the pump's user-facing display.
+  - name: oled
+    address: 0x3C
+    native: ssd1306
 
-# == I2C ===================================================================
-# Controllers: /MEM/i2c0, /MEM/i2c1. An entry needs the target's 7-bit bus
-# address. Default Pico 2 wiring for i2c0 is GP4=SDA, GP5=SCL.
-#
-# Also accepted here: bq25890, bq25892, max17043, bq27441, at24c32,
-# at24c256, ads1115, ina219, slf3x -- `emerson ctl peripherals` lists them
-# all, with a line on what each part is.
-#
-# /MEM/i2c0:
-#   # TI TMP102 temperature sensor, ADD0 tied to GND -> 0x48.
-#   - name: tmp102
-#     address: 0x48
-#     native: tmp102
-#   # SSD1306 128x64 OLED, the usual module strapping -> 0x3C.
-#   - name: oled
-#     address: 0x3C
-#     native: ssd1306
-#
-# /MEM/i2c1:
-#   # Maxim DS3231 real-time clock, fixed address 0x68.
-#   - name: rtc
-#     address: 0x68
-#     native: ds3231
+  # Sensirion SLF3S-1300F liquid flow sensor, inline on the delivery tubing.
+  # This is the independent check that insulin actually moved -- the stepper
+  # reports what it *commanded*, the flow sensor reports what happened.
+  - name: flow
+    address: 0x08
+    native: slf3x
 
-# == SPI ===================================================================
-# Controllers: /MEM/spi0, /MEM/spi1, one target each. Chip-select and
-# data/command are plain GPIO outputs the firmware bit-bangs, so they are
-# named per pin rather than taken from the controller. Default spi0 wiring is
-# SCK=GP18, MOSI=GP19, MISO=GP16.
-#
-# /MEM/spi0:
-#   # ILI9341 240x320 TFT: CS on GP17, D/C on GP20.
-#   - name: lcd0
-#     native: ili9341
-#     cs_pin: 17
-#     dc_pin: 20
-#
-#   # An SSD1680 e-paper panel goes here instead, and adds `busy_pin:` -- the
-#   # line the panel drives back at the MCU while it refreshes:
-#   # - name: epd0
-#   #   native: ssd1680
-#   #   cs_pin: 17
-#   #   dc_pin: 20
-#   #   busy_pin: 21
+# == ADC =====================================================================
+/MEM/adc:
+  # Honeywell ABP on GP27, teed into the line downstream of the syringe.
+  # Occlusion shows up here as a pressure rise before the flow sensor sees
+  # delivery fall off.
+  - name: pressure
+    channel: 1
+    native: abp_pressure
 
-# == ADC ===================================================================
-# Controller: /MEM/adc. An entry needs the input `channel:`. Channels 0-3 are
-# GP26-GP29; channel 4 is the onboard temperature sensor and is refused here,
-# since nothing external plugs into it.
-#
-# /MEM/adc:
-#   # Potentiometer on GP26. Set the wiper from the host at runtime:
-#   #   emerson ctl action /MEM/adc/potentiometer set_position_pct 75
-#   # Note the path: an i2c or adc target appears in the device tree under
-#   # its *kind*, not the `name:` below (spi and pin-wired devices use the
-#   # name). `emerson ctl ls /MEM/adc` shows what is actually there.
-#   - name: pot
-#     channel: 0
-#     native: potentiometer
-#   # Honeywell ABP pressure sensor on GP27, analog output.
-#   - name: pressure
-#     channel: 1
-#     native: abp_pressure
-
-# == Pin-wired devices =====================================================
-# Controllers: /MEM/sio, /MEM/pio0, /MEM/pio1, /MEM/pio2. These parts are not
-# bus-addressed -- they hang off individual GPIOs, so an entry carries a
-# `pins:` map from the device's own pin name to a GPIO number.
-#
-# The controller path is the block that actually drives the pin, which is what
-# makes it load-bearing rather than decorative: firmware bit-banging an
-# ordinary GPIO output drives it from SIO, while a pin clocked by a PIO
-# program is driven by that PIO block.
-#
-# /MEM/sio:
-#   # TI DRV8825 stepper driver, STEP/DIR bit-banged on GP2/GP3. `fault` is
-#   # the driver's own open-drain nFAULT output wired back to GP6 -- optional,
-#   # a board that never routed it is a normal board.
-#   #
-#   # ul_per_microstep is the mechanism's constant, not the chip's: barrel
-#   # area, lead-screw pitch, full steps/rev and the microstepping the MODE
-#   # pins select, folded into one number.
-#   - name: stepper
-#     native: drv8825
-#     pins:
-#       step: 2
-#       dir: 3
-#       fault: 6
-#     ul_per_microstep: 0.5
-#
-# /MEM/pio0:
-#   # 8-pixel WS2812 strip on GP22, clocked out by a PIO program the firmware
-#   # loads -- hence /MEM/pio0 rather than /MEM/sio.
-#   - name: strip0
-#     native: ws2812
-#     pins:
-#       data: 22
-#     num_leds: 8
+# == Pin-wired devices =======================================================
+/MEM/sio:
+  # DRV8825 microstepping driver on the syringe lead screw. STEP/DIR are
+  # bit-banged from SIO; nFAULT is the driver's open-drain fault output.
+  #
+  # ul_per_microstep folds barrel area, screw pitch, steps/rev and the
+  # microstep setting into one delivery constant. 0.05 uL/microstep gives
+  # 20 microsteps per 1 uL, fine enough for a 0.025 U basal increment.
+  - name: stepper
+    native: drv8825
+    pins:
+      step: 2
+      dir: 3
+      fault: 6
+    ul_per_microstep: 0.05

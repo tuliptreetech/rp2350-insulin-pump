@@ -35,7 +35,22 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(rp2350-insulin-pump rp2350-insulin-pump.c )
+add_executable(rp2350-insulin-pump
+        src/main.c
+        src/app/console.c
+        src/app/pump.c
+        src/app/safety.c
+        src/app/ui.c
+        src/drivers/abp_pressure.c
+        src/drivers/drv8825.c
+        src/drivers/font5x7.c
+        src/drivers/slf3x.c
+        src/drivers/ssd1306.c
+        )
+
+# The firmware itself is warning-clean under these; the SDK is not, so they
+# are scoped to this target rather than set globally.
+target_compile_options(rp2350-insulin-pump PRIVATE -Wall -Wextra)
 
 pico_set_program_name(rp2350-insulin-pump "rp2350-insulin-pump")
 pico_set_program_version(rp2350-insulin-pump "0.1")
@@ -50,12 +65,15 @@ target_link_libraries(rp2350-insulin-pump
 
 # Add the standard include files to the build
 target_include_directories(rp2350-insulin-pump PRIVATE
-        ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_LIST_DIR}/src
 )
 
 # Add any user requested libraries
-target_link_libraries(rp2350-insulin-pump 
+target_link_libraries(rp2350-insulin-pump
         hardware_i2c
+        hardware_adc
+        hardware_gpio
+        hardware_timer
         )
 
 pico_add_extra_outputs(rp2350-insulin-pump)
