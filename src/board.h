@@ -27,6 +27,24 @@
 /* ---- Honeywell ABP line-pressure sensor -------------------------------- */
 #define BOARD_PRESSURE_ADC_CH 1  /* ADC1 == GP27 */
 
+/* ---- Clocking --------------------------------------------------------- */
+
+/*
+ * System clock. The SDK default is 150 MHz; this pump runs at 48.
+ *
+ * The workload sets the floor, and it is modest: sensors are polled at 20 Hz,
+ * the display redraws at 2 Hz, and the step pulse train tops out at 2 kHz with
+ * an ISR that does little more than toggle a pin. None of that needs 150 MHz,
+ * and on a device that runs from a coin cell between cartridge changes the
+ * difference is battery life, which is a patient-facing property.
+ *
+ * 48 MHz leaves better than an order of magnitude of headroom over the busiest
+ * thing the firmware does (a 1032-byte OLED flush, which is bus-bound at
+ * 400 kHz anyway, not CPU-bound). The PLL cannot go much below ~33 MHz, so
+ * this is within one step of the practical floor.
+ */
+#define BOARD_SYS_CLOCK_KHZ  48000
+
 /* ---- Mechanism -------------------------------------------------------- */
 
 /*

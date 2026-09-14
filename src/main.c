@@ -22,6 +22,7 @@
 #include "drivers/abp_pressure.h"
 #include "drivers/drv8825.h"
 #include "drivers/slf3x.h"
+#include "hardware/clocks.h"
 #include "hardware/gpio.h"
 #include "pico/stdlib.h"
 
@@ -58,7 +59,20 @@ static void sample_sensors(safety_inputs_t *in)
 
 int main(void)
 {
+    /*
+     * Drop to the pump's working clock before anything else. This has to
+     * happen before stdio_init_all(), because clk_peri follows clk_sys and the
+     * UART divisor is computed from it at init.
+     *
+     * Not fatal if it is refused: the SDK leaves the default clock running,
+     * which is faster than asked for and so still meets every deadline. The
+     * rate is reported at boot rather than assumed.
+     */
+    bool clock_set = set_sys_clock_khz(BOARD_SYS_CLOCK_KHZ, false);
+
     stdio_init_all();
+    printf("\nclk_sys=%lu Hz%s\n", (unsigned long)clock_get_hz(clk_sys),
+           clock_set ? "" : " (requested rate refused, running at default)");
 
     bus_init();
     abp_init();

@@ -13,7 +13,9 @@ SoC simulator so the safety behaviour can be exercised without a bench.
 | Sensirion SLF3S-1300F | inline liquid flow, the independent delivery check | I2C0 @ `0x08` |
 | SSD1306 128x64 OLED | patient display | I2C0 @ `0x3C` |
 
-I2C0 is `GP4`/`GP5` at 400 kHz. [`src/board.h`](src/board.h) is the single
+`clk_sys` runs at 48 MHz rather than the SDK's 150: the workload is 20 Hz
+sensor polling, a 2 Hz display redraw and step pulses capped at 2 kHz, so the
+rest is battery life spent for nothing. I2C0 is `GP4`/`GP5` at 400 kHz. [`src/board.h`](src/board.h) is the single
 source of truth for the pin map and the mechanism constants, and
 [`.emerson/peripherals.yaml`](.emerson/peripherals.yaml) describes the same
 wiring to the simulator. Change one and change the other.
@@ -156,7 +158,8 @@ Concurrency helps, but far less than linearly — measured on this image:
 | 8 | 1,141,188 | 142,648 | 20 % |
 
 Aggregate throughput saturates at four sessions and *degrades* slightly at
-eight, so the ceiling is about 1.7× a single session. Past four workers you buy
+eight, so the ceiling is about 1.7× a single session. (Measured at the SDK
+default 150 MHz; the shape holds at 48 MHz.) Past four workers you buy
 no extra throughput and simply halve each session's speed, which pushes
 individual scenarios toward their timeouts for nothing. Hence the default of
 `PUMP_TEST_WORKERS=4`. Re-measure on other hardware before raising it.
@@ -178,15 +181,27 @@ Two rules the fixtures depend on:
 
 ### Expect it to be slow
 
-Emerson runs the core at roughly 0.6 % of real time, and that rate is flat —
-it does not improve when the firmware idles, so there is nothing to gain from
-sleeping rather than spinning. One second of firmware time costs about three
-wall-clock minutes:
+Emerson runs the core far below real time, and the rate is flat — it does not
+improve when the firmware idles, so there is nothing to gain from sleeping
+rather than spinning. Measured on this image:
 
-```
-wall_seconds ≈ firmware_seconds × clk_sys / 872,000
-```
+| `clk_sys` | one session | four sessions |
+| --- | --- | --- |
+| 150 MHz (SDK default) | 210 wall s per firmware s | 506 |
+| 48 MHz (this pump) | 94 | 282 |
 
-Scenarios are therefore written to spend as few firmware seconds as they can,
-parallelism does the rest, and the basal-rate test is opt-in because one
-microstep at the maximum basal rate takes ten wall minutes on its own.
+The pump's 48 MHz clock (see `BOARD_SYS_CLOCK_KHZ` in [src/board.h](src/board.h))
+is chosen for battery life, but it roughly halves emulated-time cost as a side
+effect, which took the suite from 43 to 14 minutes. Note the speedup is smaller
+than the clock ratio: Emerson's own throughput falls as the clock drops
+(714k ticks/s at 150 MHz, 557k at 48 MHz), because some of its cost scales with
+*emulated time* rather than with instructions executed.
+
+`WALL_PER_FIRMWARE_SECOND` in [test/pump.py](test/pump.py) carries this figure
+and every timeout is derived from it, so **re-measure it if you change
+`BOARD_SYS_CLOCK_KHZ`** — otherwise the suite inherits timeouts calibrated for
+a machine that no longer exists.
+
+Scenarios are written to spend as few firmware seconds as they can, parallelism
+and the clock do the rest, and the basal-rate test stays opt-in because one
+microstep at the maximum basal rate still takes minutes on its own.

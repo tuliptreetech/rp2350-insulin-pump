@@ -41,19 +41,22 @@ PRESSURE_CODE_MIN = 102
 PRESSURE_CODE_MAX = 3993
 
 
-# Wall-clock seconds per second of *firmware* time, worst case.
+# Wall-clock seconds per second of *firmware* time, with headroom.
 #
-# A session running alone covers a firmware second in about 210 wall seconds.
-# Four running at once - the default for the suite - contend down to roughly
-# 300k ticks/s each, which is about 506 wall seconds per firmware second. Every
-# timeout below is therefore budgeted as "how many firmware seconds does this
-# step actually need" and converted through this constant, sized for the
-# contended case rather than for a session measured on its own.
+# Measured on the RP2350 image with the pump's 48 MHz clk_sys: a session
+# running alone covers a firmware second in about 94 wall seconds, and four
+# running at once - the default for the suite - contend to about 282. Every
+# timeout below is budgeted as "how many firmware seconds does this step need"
+# and converted through this constant, sized for the contended case with a
+# margin, not for a session measured on its own.
 #
-# Getting this wrong is not a flaky test, it is a misleading one: the occlusion
+# Getting it wrong is not a flaky test, it is a misleading one: the occlusion
 # scenario once failed 50 ms of firmware time short of the alarm it was waiting
 # for, which reads exactly like the firmware never alarming.
-WALL_PER_FIRMWARE_SECOND = 520
+#
+# Re-measure after changing BOARD_SYS_CLOCK_KHZ - this tracks it. At the SDK
+# default of 150 MHz the contended figure was 506.
+WALL_PER_FIRMWARE_SECOND = 340
 
 
 def wall(firmware_seconds):
