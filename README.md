@@ -58,14 +58,21 @@ Dose envelope: 5.000 U/hr basal, 25 U single bolus, 30 U in any rolling hour.
 The occlusion threshold is derived, not picked: the set builds about
 0.2 psi/µL against a blockage and sits at 0.03 psi when clear, so every 1 psi
 of threshold is half a unit pumped into a line that is going nowhere. 4 psi is
-130× the working pressure of a clear line and bounds the loss at roughly 2 U.
+130× the working pressure of a clear line and costs about 2 U to reach.
+
+The dwell costs the same again: holding the threshold for 2 s at the bolus
+rate of 1 U/s is another 2 U, so a bolus into a blocked line loses roughly
+4 U, not 2, and the pressure overshoots to about twice the threshold before
+the pump acts — 8.1 psi measured against a 4 psi trip. That is the price of
+not alarming on the pressure spike a bubble or a bumped syringe also makes,
+and it is bounded: the mechanism stops, so the line goes no higher.
 
 Alarms **latch**. `ack` clears only those whose underlying condition has
 actually gone away; anything still true stays latched and delivery stays
 suspended. "It fixed itself" is not a judgement a pump gets to make on a
 patient's behalf.
 
-Two design points worth knowing:
+A few design points worth knowing:
 
 - **The flow sensor cannot see basal.** One count on the SLF3S-1300F is about
   2 µL/min and 1 U/hr is 0.17 µL/min, so delivery verification arms only
@@ -74,6 +81,11 @@ Two design points worth knowing:
 - **Basal and bolus are serialised.** There is one mechanism, so basal demand
   accrues in the accumulator during a bolus and is paid out when the bolus
   finishes. It is held back, never dropped.
+- **A suspended bolus is abandoned, not resumed.** `pump_suspend()` zeroes the
+  outstanding dose, so clearing the fault and acknowledging it returns the pump
+  to delivering basal — the interrupted bolus has to be re-commanded, by
+  someone who has looked at how much of it already went in. Resuming a dose
+  automatically after a fault is a decision for the person, not the firmware.
 - **The specific diagnosis wins.** A blocked line stops the flow too, so
   `NO DELIVERY` is suppressed for any bolus during which the line pressure
   rose — `OCCLUSION` says what to go and fix, and the two rules must not race
@@ -131,17 +143,59 @@ Measured latencies at 48 MHz on an idle server, so you know what to expect:
 boot to first telemetry 21 s; a console command and its reply 3-4 s; motor or
 air-in-line alarm 11 s, with the panel banner 16 s later; sensor-fault alarms
 30-60 s (they need ten consecutive bad samples); a 1 U bolus about 90 s; and an
-occlusion roughly 7 minutes, since the line has to build pressure and then hold
-it through the dwell.
+occlusion about 4½ minutes from the `bolus` command, since the line has to
+build pressure and then hold it through the dwell. Expect the occlusion to take
+longer when other sessions are running — it is the one alarm long enough for
+the contention in the table below to show.
 
-The recovery sequence is the most interesting thing to show, and it is quick:
+The recovery sequence is the most interesting thing to show. The quick version,
+on the motor fault:
 
 ```sh
 emerson ctl action /MEM/stepper inject_fault overcurrent
-emerson ctl broker tty0 $'ack\r'          # refused - the cause is still present
+emerson ctl broker tty0 $'ack\r'          # appears to clear, then re-latches
 emerson ctl action /MEM/stepper clear_fault
 emerson ctl broker tty0 $'ack\r'          # clears, and delivery resumes
 ```
+
+Note what the first `ack` actually does, because it is easy to describe
+wrongly: it is not refused. `safety_acknowledge()` drops the latch, the next
+safety pass sees the fault is still asserted and raises it again, so the
+console prints `ok alarms=0x000` and the telemetry still reads `alarms=0x001`
+a moment later. The mask in the reply is what was left at that instant, not a
+promise about the next one. Alarms whose condition the ack can test directly —
+occlusion, both sensor faults, reservoir-empty, hour-limit — are held back in
+the reply instead and never clear at all.
+
+A successful `ack` also resumes delivery by itself (`pump_resume()`, at the end
+of `safety_acknowledge()`), so the `run` you might expect to need afterwards is
+redundant.
+
+The occlusion tells the better story, because the pump has to stop mid-dose.
+End to end this is about 7 minutes of wall clock — [DEMOS.md](DEMOS.md) has
+this one and the motor fault written out as rehearsed walkthroughs, with the
+measured timings and the places it is easy to misnarrate:
+
+```sh
+emerson ctl broker tty0 $'run\r'
+emerson ctl action /MEM/adc/abp_pressure set_occluded true
+emerson ctl broker tty0 $'bolus 8.0\r'    # oversized: the line needs room to build
+
+# ~4.5 min: watch psi_m climb past 4000 and the pump suspend itself
+emerson ctl broker tty1 | tail -1         # mode=2 alarms=0x002 psi_m=8086
+emerson ctl action /MEM/i2c0/ssd1306 dump_display   # SUSPENDED / OCCLUSION
+
+emerson ctl action /MEM/adc/abp_pressure set_occluded false
+emerson ctl broker tty0 $'ack\r'          # clears first try, and resumes
+emerson ctl broker tty0 $'bolus 1.0\r'    # the abandoned dose does not resume
+```
+
+Two things to know before doing this in front of anyone. The line vents the
+moment `set_occluded` goes false — pressure was back to zero within one
+telemetry poll — so `ack` is accepted immediately, unlike the sensor faults,
+where you have to wait for a healthy reading before it will clear. And the 8 U
+bolus is deliberately oversized: about 4 U goes in before the alarm and the
+rest is never delivered, so the dose you re-command afterwards is a fresh one.
 
 ## Building
 
@@ -179,8 +233,22 @@ emerson ctl action /MEM/i2c0/slf3x set_crc_error_period 1
 test/run_tests.sh                    # the fault-injection suite, in parallel
 test/run_tests.sh --runslow          # adds the slow basal-rate scenario
 test/run_tests.sh -k occlusion       # one scenario
+test/run_tests.sh -k 'ack or recovery'   # compound selections work too
 PUMP_TEST_WORKERS=4 test/run_tests.sh
 ```
+
+Two files:
+
+| File | Covers |
+| --- | --- |
+| [`test/test_pump.py`](test/test_pump.py) | delivery accounting, the dose envelope, and every alarm being **raised** |
+| [`test/test_demos.py`](test/test_demos.py) | what happens **afterwards** — clearing the fault, acknowledging it, and delivering again |
+
+The split is by half of the story rather than by feature: a fault that stops
+the pump and a pump that comes back afterwards fail for different reasons and
+cost very different amounts to run. The recovery scenarios are also the ones
+walked through in [DEMOS.md](DEMOS.md), so they double as a check that the
+demos still do what that document says they do.
 
 Each scenario drives the firmware through its serial console, injects a
 hardware fault through Emerson's device models, and asserts on three
@@ -229,6 +297,11 @@ Two rules the fixtures depend on:
   fixture, which would stop sibling workers' sessions that are still in flight.
   A session leaked by a crashed run silently stalls the next session on the
   same project, with no error anywhere.
+- **Never run two `run_tests.sh` at once.** The same clearing step cannot tell
+  a leaked session from a live one belonging to another run, so the second
+  invocation stops the first one's sessions out from under it. The victim
+  reports a test failure somewhere unrelated, which is a thoroughly misleading
+  way to find this out. Use `-k` to select within a single run instead.
 
 ### Expect it to be slow
 

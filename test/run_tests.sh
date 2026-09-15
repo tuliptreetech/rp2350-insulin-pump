@@ -48,6 +48,14 @@ if [ "$local_md5" != "$container_md5" ]; then
     fi
 fi
 
+# Re-quote the caller's arguments so they survive the trip through `sh -c`
+# inside the container. Interpolating $* raw splits on whitespace, which turns
+# -k 'a or b' into three arguments and silently collects no tests at all.
+pytest_args=""
+if [ "$#" -gt 0 ]; then
+    pytest_args=$(printf ' %q' "$@")
+fi
+
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 cp test/*.py "$stage/"
@@ -71,5 +79,5 @@ python3 $REMOTE/clear_sessions.py
 # --dist load spreads individual tests across workers. loadfile would keep
 # every test in one file on a single worker, which is all of them.
 cd $REMOTE && exec python3 -m pytest -p no:cacheprovider \
-    -n $WORKERS --dist load -v -ra $*
+    -n $WORKERS --dist load -v -ra$pytest_args
 "
