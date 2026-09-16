@@ -394,8 +394,7 @@ actually found.
 
 ### What they found
 
-Measured on Emerson `1.0.15-local` with the TIMER de-assert fix and the
-clock-derived plunger physics, at the pump's 48 MHz `clk_sys`.
+Measured on Emerson `1.0.15-local`, at the pump's 48 MHz `clk_sys`.
 
 | Scenario | Result | What it means |
 | --- | --- | --- |
@@ -490,12 +489,6 @@ not failing: [safety.c:111](src/app/safety.c#L111) tests
 `measured < commanded * 50%` and nothing anywhere tests the other direction,
 so there is no rule for this to trip.
 
-Worth knowing if you are re-reading old output: before the emulator's plunger
-physics was fixed to derive from the configured clock, this same run reported
-**11.9x** — the 4x injection multiplied by a 3.125x scaling error at 48 MHz.
-The conclusion never depended on the number (the absence of an upper bound is a
-fact about the source), but the number itself was junk. Do not quote it.
-
 **The companion injection**, the mechanism half rather than the fluid half:
 
 ```sh
@@ -518,13 +511,6 @@ to file.
 The test asserts the invariant rather than the outcome, so it stays honest
 whichever way the threshold moves: if an alarm fires, the delivered fraction
 must be below the floor; if none fires, it must be above it.
-
-This scenario was unanswerable until the emulator's plunger physics was fixed.
-Before that it reported **225% delivered** for a mechanism that was *losing* a
-quarter of its steps — 75% inflated by the 3.125x clock-scaling error. The
-mechanical half was still sound (the driver model moved fewer microsteps than
-were pulsed, which the test checks separately), but the flow-derived percentage
-was meaningless, and so was the threshold question built on it.
 
 **What it needs before it can be run:**
 
@@ -594,10 +580,6 @@ this sensor at this threshold — and the honest thing is to say that rather tha
 to invent a rule keyed on 27 mpsi of signal. The occlusion trip sits at 4000
 mpsi, roughly 150x the entire pressure excursion of a healthy dose, which is
 the same fact from the other end.
-
-Note this got *stronger* when the emulator's physics was fixed. The pre-fix run
-reported 91 mpsi; the corrected figure is 27, so the signal is smaller than it
-first looked and the conclusion holds with more margin, not less.
 
 **What it needs:** the baseline run; a new rule and alarm bit; and a decision
 about whether the leak is modelled upstream or downstream of the flow sensor,
