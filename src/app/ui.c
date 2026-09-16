@@ -98,15 +98,21 @@ static void draw_headline(const pump_status_t *ps, pump_alarm_t top)
     ssd1306_text(0, 11, buf, 2);
 }
 
+/*
+ * The progress bar lives entirely inside text row 3 (y24..31) so that row 4
+ * stays free for the flow reading. The headline above it is scale-2 text at
+ * y11 and the font's eighth row is blank, so it ends at y24 and the bar can
+ * start at y27 with a two-pixel gap.
+ */
 static void draw_bolus_bar(const pump_status_t *ps)
 {
-    ssd1306_fill_rect(0, 28, SSD1306_WIDTH, 1, true);
-    ssd1306_fill_rect(0, 34, SSD1306_WIDTH, 1, true);
+    ssd1306_fill_rect(0, 27, SSD1306_WIDTH, 1, true);
+    ssd1306_fill_rect(0, 31, SSD1306_WIDTH, 1, true);
 
     uint32_t pct = ps->bolus_total_mu
         ? (ps->bolus_delivered_mu * 100u) / ps->bolus_total_mu : 0;
     if (pct > 100) pct = 100;
-    ssd1306_fill_rect(0, 29, (int)((SSD1306_WIDTH * pct) / 100u), 5, true);
+    ssd1306_fill_rect(0, 28, (int)((SSD1306_WIDTH * pct) / 100u), 3, true);
 }
 
 void ui_render(const safety_inputs_t *in)
@@ -123,16 +129,22 @@ void ui_render(const safety_inputs_t *in)
 
     if (pump_bolus_active()) {
         draw_bolus_bar(&ps);
-    } else {
-        /* Flow, in uL/min, from the sensor that is watching the tubing. */
-        if (in->flow_status == SLF3X_OK) {
-            fmt_milli(num, sizeof num, in->flow.nl_per_min, 1);
-            snprintf(line, sizeof line, "Flow  %s uL/m", num);
-        } else {
-            snprintf(line, sizeof line, "Flow  --");
-        }
-        ssd1306_text_at(0, 4, line);
     }
+
+    /*
+     * Flow, in uL/min, from the sensor that is watching the tubing. Drawn
+     * during a bolus as well as outside one: a bolus is the only time this
+     * reading means anything, because one count on the SLF3S-1300F is about
+     * 2 uL/min and a basal rate is two orders of magnitude below that. The
+     * delivery check in safety.c arms on the same reasoning.
+     */
+    if (in->flow_status == SLF3X_OK) {
+        fmt_milli(num, sizeof num, in->flow.nl_per_min, 1);
+        snprintf(line, sizeof line, "Flow  %s uL/m", num);
+    } else {
+        snprintf(line, sizeof line, "Flow  --");
+    }
+    ssd1306_text_at(0, 4, line);
 
     if (in->pressure.valid) {
         fmt_milli(num, sizeof num, in->pressure.millipsi, 2);
