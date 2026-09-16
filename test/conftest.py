@@ -35,8 +35,17 @@ def pytest_addoption(parser):
 # workers sit idle. Ordering here rather than in the test file keeps the file
 # readable and grouped by subject.
 _LONGEST_FIRST = [
+    # Two boluses in one session, so the longest scenario in the suite.
+    "test_a_leaking_set_is_not_detected",
+    # The demo 8 window scenarios: skipped without --runslow, and the bulk of
+    # the run with it.
+    "test_pressure_noise_near_the_trip_does_not_alarm",
+    "test_isolated_crc_errors_do_not_alarm",
+    "test_a_single_nfault_sample_does_not_latch",
     "test_occlusion_suspends",
     "test_under_delivery_detected",
+    "test_over_delivery_during_a_bolus",
+    "test_step_slip_under_delivers_below_the_alarm_threshold",
     "test_recovery_requires_the_fault_to_clear",
     "test_bolus_cancel_bills_only_what_moved",
     "test_bolus_delivers",
