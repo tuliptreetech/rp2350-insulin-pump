@@ -767,6 +767,19 @@ The address is not hardcoded. `run_tests.sh` reads `drv8825_faulted` out of the
 ELF and the test disassembles forward to the load, so a rebuild that moves the
 function or changes the register allocation does not silently test nothing.
 
+**Driving it.** [`test/glitch_demo.sh`](test/glitch_demo.sh) runs the whole
+thing in about 30 seconds against whatever session is already up, so the web UI
+can be open on the OLED and the serial ports while it goes:
+
+```sh
+emerson start && emerson ctl go
+test/glitch_demo.sh
+```
+
+It is the only demo here short enough to run live in front of an audience -
+the glitch is staged with breakpoints rather than waited out in firmware time.
+The same scenario is asserted in `test_recall_demos.py` under `--runslow`.
+
 **What it found.**
 
 ```
