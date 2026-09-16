@@ -405,21 +405,26 @@ Measured on Emerson `1.0.15-local`, at the pump's 48 MHz `clk_sys`.
 | 8. Pressure noise | **pass** | noise crossing the trip on ~30% of samples never satisfied the 2 s dwell |
 | 8. Isolated CRC | **pass** | one bad read in three never tripped `FLOW_SENSOR` |
 | 8. nFAULT glitch | `xfail` | one sampled assertion of nFAULT latched `MOTOR_FAULT` and suspended delivery |
+| 9. Microsecond glitch | `xfail` | a **100 µs** nFAULT pulse — 1/498 of a control period — latched `MOTOR_FAULT` and suspended delivery |
 
 The two passes are as much a result as the xfails, and they are the half worth
 saying out loud when the subject is Malfunction 12: both debounces demonstrably
 reject transients, and that is now evidence rather than a reading of the source.
 
-**The nFAULT result is the one real firmware finding**, and it needs stating
-carefully. What is demonstrated is that the motor path commits on a single
-sample where pressure and flow each require ten consecutive — the asymmetry is
-real and reachable. What is *not* demonstrated is that a spurious assertion is
-likely: the glitch that could be staged deterministically was about one control
-period wide, and 50 ms of nFAULT on real silicon is plausibly a genuine
-overcurrent fault rather than a glitch. Proving the hazard needs a glitch much
-narrower than a poll that still lands on one, which is a harder experiment than
-the one behind this table. Do not put "we found Malfunction 12" on a slide.
-Do put "our motor path takes no second look, and our sensor paths do".
+**The nFAULT result is the one real firmware finding**, and
+[demo 9](#demo-9--the-microsecond-glitch-the-experiment-a-bench-cannot-run) is
+what settles it. Demo 8c shows the motor path commits on a single sample where
+pressure and flow each require ten consecutive, but at a 50 ms glitch it cannot
+show the firmware was *wrong* to act — 50 ms of nFAULT on real silicon is
+plausibly a genuine overcurrent. Demo 9 closes that by staging the glitch three
+orders of magnitude narrower, and the pump latches anyway.
+
+What can now be said on a slide: **we reproduced Malfunction 12's failure mode
+in our own firmware** — a transient far too brief to be a real fault stops
+insulin delivery, latches, and leaves no trace of a fault in the record. What
+still cannot: that this was Tandem's mechanism, or that our DRV8825 emits such
+glitches at any particular rate. The defect demonstrated is the missing
+debounce, not a frequency.
 
 Demos 1-5 all have the same shape. Inject a fault, the right alarm fires, the
 pump suspends. They show the safety layer working as designed, which is worth
@@ -433,6 +438,7 @@ in those shapes, each drawn from a specific recall.
 | [6. Free flow](#demo-6--free-flow-the-check-that-only-looks-one-way) | Medtronic MiniMed 630G/670G retainer ring (Class I, Feb 2020) | delivered too much |
 | [7. Leaking set](#demo-7--the-leaking-set-the-failure-both-instruments-call-healthy) | Insulet Omnipod 5 internal tubing tear (Class I, Apr 2026) | failed to alarm |
 | [8. False alarm](#demo-8--the-false-alarm-the-scenarios-that-assert-nothing-happens) | Tandem Mobi "Malfunction 12" (Class I, 2026) | alarmed when it should not have |
+| [9. Microsecond glitch](#demo-9--the-microsecond-glitch-the-experiment-a-bench-cannot-run) | Tandem Mobi "Malfunction 12" (Class I, 2026) | alarmed when it should not have |
 
 There is a bias in demos 1-5 worth naming while presenting these: every one of
 them is on the **under-delivery** side. That matches the largest bucket in
@@ -723,6 +729,84 @@ That window is budgeted in **firmware** time, not wall clock — a wall-clock
 window would mean a different number of sensor polls on a loaded server than on
 an idle one, which is exactly the test that passes because it was too short.
 All three are marked `slow` and need `--runslow`.
+
+### Demo 9 — The microsecond glitch: the experiment a bench cannot run
+
+**Drawn from:** Tandem Mobi, Class I 2026, firm-initiated 6 October 2025.
+17,700+ devices, 281 adverse events, 4 injuries. Software incorrectly detected
+a vibration-motor problem and raised "Malfunction 12", cutting insulin
+delivery. Corrected by a remote update to 7.9.0.2. Same recall as
+[demo 8](#demo-8--the-false-alarm-the-scenarios-that-assert-nothing-happens);
+this is the half demo 8c could not finish.
+
+**What the scenario probes.** Demo 8c asserts nFAULT for about one control
+period — 50 ms — and the pump latches. That shows the asymmetry is reachable.
+It does not show the firmware was *wrong*, because 50 ms of nFAULT on a real
+DRV8825 is a plausible overcurrent. The two claims only separate at a width no
+real fault could have.
+
+So this one stages **100 µs**: 1/500th of the control period, three orders of
+magnitude below any overcurrent trip the driver would hold. If the pump stops
+insulin for that, it is not catching a fault. It is inventing one.
+
+**Why it cannot be driven from the shell, or from a bench.** The glitch has to
+be present at the instant of one poll and absent at every other, and the polls
+are 50 ms apart. Two `emerson ctl` invocations land arbitrarily far apart in
+firmware time; a signal generator on real hardware has no way to know when the
+firmware samples. The core has to be stopped *at the sampling instruction*:
+
+1. Break on the instruction in `drv8825_faulted()` that loads SIO `GPIO_IN`.
+   Two hits give the poll period, measured rather than assumed.
+2. Walk to 100 µs before the next sample, with the line still clear.
+3. Assert nFAULT — **before** the sample, not at it. The device model needs
+   ticks to settle a level change onto the pin; injecting at the breakpoint
+   itself reads back as still-clear and the scenario would stage nothing.
+4. Run into the sample, retire the load, release nFAULT immediately.
+
+The address is not hardcoded. `run_tests.sh` reads `drv8825_faulted` out of the
+ELF and the test disassembles forward to the load, so a rebuild that moves the
+function or changes the register allocation does not silently test nothing.
+
+**What it found.**
+
+```
+poll period          2,400,000 ticks = 50.00 ms
+nFAULT asserted      100.2 µs  (1/498 of one control period)
+drv8825_faulted()    returned 1 — the sample really saw it
+result               mode=2 SUSPENDED, alarms=0x001 MOTOR_FAULT, nfault=0
+```
+
+A 100 µs pulse latched `MOTOR_FAULT` and suspended basal delivery, and it stays
+suspended until someone acknowledges it.
+
+**The detail worth putting on the screen** is the last line. Telemetry reports
+`nfault=0` *alongside* `alarms=0x001`: the pump is stopped for a fault that is
+not present, was never present for longer than a tenth of a millisecond, and
+appears nowhere in the record. Anyone reading the log afterwards sees a pump
+that suspended itself for no reason — which is exactly the position Mobi's
+users and Tandem's engineers were in.
+
+The measured poll period doubles as the tick calibration demo 8c performs
+explicitly: 2,400,000 ticks landing on a 50 ms control period at 48 MHz is what
+establishes that a tick is a `clk_sys` cycle. If it were not, every width above
+would be wrong by that factor and the test fails loudly rather than reporting a
+number it cannot justify.
+
+**What it needs:** a debounce on the motor path. `safety.c:139-141` raises
+`MOTOR_FAULT` from one sample; the pressure and flow paths each require
+`SENSOR_FAIL_LIMIT` — ten — consecutive. Two consecutive samples would reject
+every glitch narrower than 50 ms while costing 50 ms of latency on a real
+fault, against an occlusion rule that already dwells for 2 s.
+
+**What this demo is for.** The other scenarios ask whether this firmware would
+have caught someone else's recall. This one asks the more useful question:
+**would this method have caught the recall before it shipped?** The defect is
+a missing debounce on a fault input — invisible in review, unreachable from
+the console, and not reproducible on a bench, because staging it needs the core
+stopped between two instructions. Run this scenario against Mobi's motor fault
+detection before release and the missing second look is a test result, not
+17,700 devices and 281 adverse events.
+
 
 ## Resetting between demos
 

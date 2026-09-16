@@ -56,6 +56,16 @@ if [ "$#" -gt 0 ]; then
     pytest_args=$(printf ' %q' "$@")
 fi
 
+# Demo 9 stops the core at the instruction that samples nFAULT, which means it
+# needs that instruction's address. Read it out of the ELF rather than pinning
+# it in the test: every rebuild can move it. The test disassembles forward from
+# here to find the actual load, so only the symbol has to be right.
+NFAULT_ADDR=$(nm build/rp2350-insulin-pump.elf 2>/dev/null \
+              | awk '$3 == "drv8825_faulted" { print "0x" $1 }')
+if [ -z "$NFAULT_ADDR" ]; then
+    echo "warning: drv8825_faulted not found in the ELF - demo 9 will skip." >&2
+fi
+
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 cp test/*.py "$stage/"
@@ -78,6 +88,6 @@ python3 $REMOTE/clear_sessions.py
 
 # --dist load spreads individual tests across workers. loadfile would keep
 # every test in one file on a single worker, which is all of them.
-cd $REMOTE && exec python3 -m pytest -p no:cacheprovider \
-    -n $WORKERS --dist load -v -ra$pytest_args
+cd $REMOTE && PUMP_DRV8825_FAULTED_ADDR='$NFAULT_ADDR' exec python3 -m pytest \
+    -p no:cacheprovider -n $WORKERS --dist load -v -ra$pytest_args
 "

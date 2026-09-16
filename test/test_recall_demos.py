@@ -9,6 +9,7 @@ are the other three shapes, and this file is one scenario per shape:
   6. delivered the wrong amount   Medtronic MiniMed 630G/670G retainer ring
   7. failed to alarm              Insulet Omnipod 5 internal tubing tear
   8. alarmed when it should not   Tandem Mobi "Malfunction 12"
+  9. alarmed when it should not   the same recall, at a width that settles it
 
 How these are meant to fail
 ---------------------------
@@ -28,8 +29,8 @@ broken test. They are built so the two are never confused:
 
 So a green run with a handful of xfails is this file working. Read the reasons.
 
-Nothing here has been run. Every timeout is budgeted from a comparable
-scenario in test_pump.py, not measured on these.
+Every scenario here has been run; the measured results and what they mean are
+in DEMOS.md. Timeouts are budgeted from comparable scenarios in test_pump.py.
 
 Cost
 ----
@@ -38,6 +39,7 @@ which cannot be hurried: at the rates in pump.py a six-second window is tens of
 wall-clock minutes. Those three are marked `slow` and need `--runslow`.
 """
 
+import os
 import time
 
 import pytest
@@ -64,6 +66,21 @@ SENSOR_POLL_MS = 50
 SYS_CLOCK_KHZ = 48000
 
 MICROSTEPS_PER_UNIT = 200          # 1.000 U / 5 mU per microstep
+
+# Demo 9 stages a glitch this wide. 100 us is 1/500th of a control period and
+# three orders of magnitude below any overcurrent a DRV8825 would hold - short
+# enough that nobody can argue it is a real fault the firmware caught.
+GLITCH_US = 100
+GLITCH_TICKS = GLITCH_US * (SYS_CLOCK_KHZ // 1000)
+
+# The Hazard3 core, for breakpoints. Demo 9 is the only scenario that needs to
+# stop the core at a specific instruction rather than step a duration.
+CPU = "/Hazard3Cpu"
+
+# RP2350 SIO. GPIO_IN is the register drv8825_faulted() reads to sample nFAULT,
+# and it is fixed by the architecture rather than by our build.
+SIO_BASE_UPPER = "0xd0000"
+SIO_GPIO_IN_OFFSET = "0x4"
 
 # How long a "nothing happened" window has to be, in firmware milliseconds, to
 # mean anything. Three times the occlusion dwell and 120 times the ten
@@ -754,3 +771,190 @@ def test_a_single_nfault_sample_does_not_latch(pump):
         )
 
     assert released["nfault"] == 0, "nFAULT never released"
+
+
+# ===========================================================================
+# Demo 9 - Tandem Mobi "Malfunction 12", Class I 2026, firm-initiated
+# 6 October 2025. 17,700+ devices, 281 adverse events, 4 injuries. A software
+# issue made the pump incorrectly detect a vibration-motor problem and raise a
+# false alert that cut insulin delivery. The pump was not broken; its fault
+# detection was.
+#
+# Demo 8c asks the same question at a 50 ms glitch - about one control period -
+# and DEMOS.md is careful to say what that does not prove: 50 ms of nFAULT on
+# real silicon is plausibly a genuine overcurrent, so "the firmware latched"
+# and "the firmware was wrong to latch" are not the same claim at that width.
+#
+# This scenario closes that gap by making the glitch narrow enough that the
+# ambiguity disappears, and it is the experiment a bench cannot run: staging a
+# pulse three orders of magnitude shorter than the poll interval and landing it
+# on the poll requires stopping the core at the sampling instruction.
+# ===========================================================================
+
+
+def _nfault_sample_address(cpu):
+    """
+    The address of the instruction that samples nFAULT.
+
+    Resolved rather than hardcoded. run_tests.sh passes the address of
+    drv8825_faulted from the ELF's symbol table; the sampling instruction is
+    then found by disassembling forward to the first load of SIO's GPIO_IN,
+    which is what makes this survive a rebuild that moves the function or
+    changes the register allocation.
+    """
+    entry = os.environ.get("PUMP_DRV8825_FAULTED_ADDR")
+    if not entry:
+        pytest.skip(
+            "PUMP_DRV8825_FAULTED_ADDR is not set, so the nFAULT sampling "
+            "instruction cannot be located. Run this through test/run_tests.sh, "
+            "which reads it out of the ELF."
+        )
+
+    listing = cpu.get_disassembly(int(entry, 16), 24)
+    base_reg = None
+    for addr, text in listing:
+        if "lui" in text and SIO_BASE_UPPER in text:
+            # "lui a5,0xd0000" -> "a5"
+            base_reg = text.split()[1].split(",")[0]
+        elif base_reg and "lw" in text and f"{SIO_GPIO_IN_OFFSET}({base_reg})" in text:
+            return addr, text
+
+    raise AssertionError(
+        f"no load of SIO GPIO_IN found in the first {len(listing)} instructions "
+        f"of drv8825_faulted at {entry}. The firmware no longer samples nFAULT "
+        f"the way this scenario assumes, so it would be staging nothing. "
+        f"Disassembly: {listing}"
+    )
+
+
+def _run_to_breakpoint(pump, timeout_s):
+    """Resume and block until the breakpoint stops the core again."""
+    pump.m.go()
+    # go() returns before the core is actually running; without this the
+    # is_paused() below reads the state from *before* the resume and the
+    # function returns immediately, having stepped nothing.
+    time.sleep(1.0)
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if pump.m.is_paused():
+            return True
+        time.sleep(0.2)
+    return False
+
+
+@pytest.mark.slow
+def test_a_microsecond_nfault_glitch_suspends_delivery(pump):
+    """
+    nFAULT asserted for 100 us, landed on one poll, then released.
+
+    Demo 8c's 50 ms glitch shows the motor path takes no second look. It
+    cannot show that the firmware was *wrong* to act, because 50 ms of nFAULT
+    is a plausible real fault. This one can: 100 us is 1/500th of the control
+    period, and no overcurrent trip on a DRV8825 is that brief.
+
+    Staging it needs the core stopped at the sampling instruction, because the
+    glitch has to be present at the instant of one poll and absent at every
+    other. The sequence is: measure the poll period from two breakpoint hits,
+    walk to GLITCH_TICKS before the next one, assert nFAULT, let the core run
+    into the sample, release nFAULT immediately after the load retires.
+
+    The pin state has to be asserted *before* the core reaches the load, not
+    at it - the device model needs ticks to propagate a level change onto the
+    pin, and injecting at the breakpoint itself reads back as still-clear.
+    """
+    cpu = pump.m.get_device(CPU)
+    sample_addr, sample_text = _nfault_sample_address(cpu)
+
+    pump.start_delivery()
+    before = pump.telemetry()
+    assert before["alarms"] == 0 and before["mode"] == 1, (
+        f"the pump was not cleanly delivering before the glitch: {before}"
+    )
+
+    pump.m.pause()
+    time.sleep(0.5)
+    bp = cpu.break_on_address(sample_addr)
+    try:
+        # --- the poll period, measured rather than assumed ---------------
+        assert _run_to_breakpoint(pump, wall(2)), "nFAULT is never sampled"
+        first = pump.m.tick_count
+        assert _run_to_breakpoint(pump, wall(2)), "nFAULT is sampled only once"
+        period = pump.m.tick_count - first
+
+        # This doubles as the tick calibration demo 8c does explicitly: if a
+        # tick were not a clk_sys cycle, the period would not land on the
+        # control period and every width below would be wrong by that factor.
+        expected = SENSOR_POLL_MS * SYS_CLOCK_KHZ
+        assert expected * 0.9 <= period <= expected * 1.1, (
+            f"nFAULT is sampled every {period} ticks, not the ~{expected} "
+            f"expected from a {SENSOR_POLL_MS} ms control period at "
+            f"{SYS_CLOCK_KHZ} kHz. Either a tick is not a clk_sys cycle or the "
+            f"loop has changed, and the glitch width cannot be trusted."
+        )
+
+        # --- walk to just before the next sample, still clear -------------
+        cpu.disable_breakpoint(bp.id)
+        pump.m.step(period - GLITCH_TICKS)
+        pump.m.wait()
+        asserted_at = pump.m.tick_count
+
+        healthy = pump.action(pump.stepper, "get_status")
+        pump.action(pump.stepper, "inject_fault", "overcurrent")
+        faulted = pump.action(pump.stepper, "get_status")
+
+        # --- run into the sample, then release immediately ----------------
+        cpu.enable_breakpoint(bp.id)
+        assert _run_to_breakpoint(pump, wall(2)), (
+            "the core never reached the next nFAULT sample"
+        )
+        at_sample = pump.m.tick_count
+
+        pump.m.step(8)          # retire the load and the compare behind it
+        pump.m.wait()
+        sampled = int(cpu.get_register("a0").value)
+        pump.action(pump.stepper, "clear_fault", "")
+        width_ticks = pump.m.tick_count - asserted_at
+    finally:
+        cpu.disable_breakpoint(bp.id)
+        pump.m.go()
+
+    width_us = width_ticks / (SYS_CLOCK_KHZ / 1000.0)
+
+    # --- the scenario really staged --------------------------------------
+    assert faulted != healthy, (
+        f"the stepper model reported the same status faulted as healthy "
+        f"({healthy!r}), so nFAULT was never asserted at all"
+    )
+    assert sampled == 1, (
+        f"drv8825_faulted() returned {sampled} at {sample_text!r}, so the "
+        f"glitch was not present when the firmware sampled the pin and this "
+        f"run says nothing about debouncing. The pin needs ticks to settle - "
+        f"widen GLITCH_TICKS (currently {GLITCH_TICKS}) before reading "
+        f"anything into a zero here."
+    )
+    assert at_sample - asserted_at <= period // 2, (
+        f"nFAULT was asserted {at_sample - asserted_at} ticks before the "
+        f"sample, more than half the {period}-tick poll interval - the pulse "
+        f"is not the narrow glitch this scenario claims to have staged"
+    )
+    assert width_us < SENSOR_POLL_MS * 1000 / 10.0, (
+        f"the glitch was {width_us:.1f} us wide against a "
+        f"{SENSOR_POLL_MS} ms poll interval; that is not narrow enough to "
+        f"distinguish a glitch from a fault"
+    )
+
+    # --- the requirement --------------------------------------------------
+    held, last = quiet(pump, f"a {width_us:.0f} us nFAULT glitch")
+    if not held:
+        pytest.xfail(
+            f"nFAULT was asserted for {width_us:.1f} us - 1/{period // width_ticks} "
+            f"of one {SENSOR_POLL_MS} ms control period - and released, and the "
+            f"pump latched {alarm_names(last['alarms'])} and suspended "
+            f"(mode={MODES[last['mode']]}). Telemetry reports nfault="
+            f"{last['nfault']} alongside it, so the pump is stopped for a fault "
+            f"that is not present and never appears in the record. "
+            f"safety.c:139-141 raises MOTOR_FAULT from a single sample while "
+            f"pressure and flow each require {SENSOR_FAIL_LIMIT} consecutive. "
+            f"This is Malfunction 12's failure mode: not a broken pump, a "
+            f"broken fault detector. Needs a debounce on the motor path."
+        )
