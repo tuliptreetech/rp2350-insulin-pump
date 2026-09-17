@@ -39,6 +39,24 @@
  * is a bus collision; ten in a row is a disconnected sensor. */
 #define SENSOR_FAIL_LIMIT  10
 
+/*
+ * Consecutive samples before the driver's fault line is believed.
+ *
+ * nFAULT is a level on a pin read once per control period, not a transaction
+ * that can fail, so a single sample commits to whatever the line happened to
+ * be doing at that instant. A glitch narrower than the interval between two
+ * polls is then indistinguishable from a sustained fault, and it latches an
+ * alarm that suspends delivery until someone acknowledges it.
+ *
+ * Two is the smallest number that rejects anything narrower than a poll, and
+ * the latency is close to free: the DRV8825 disables its own outputs when it
+ * asserts nFAULT, so no insulin moves during the confirmation window either
+ * way. It stays well below SENSOR_FAIL_LIMIT deliberately - a sustained
+ * nFAULT is a real event the patient should be told about promptly, unlike a
+ * flaky sensor read.
+ */
+#define MOTOR_FAIL_LIMIT  2
+
 /* Alarms that stop delivery: everything except the advisory low-reservoir. */
 #define BLOCKING_MASK  (~(1u << ALARM_RESERVOIR_LOW))
 
@@ -48,6 +66,7 @@ static struct {
 
     uint64_t occlusion_since_us;  /* 0 when pressure is below threshold */
 
+    uint32_t motor_fails;
     uint32_t pressure_fails;
     uint32_t flow_fails;
 
@@ -138,7 +157,11 @@ void safety_update(uint64_t now_us, const safety_inputs_t *in)
 
     /* ---- Motor driver ------------------------------------------------- */
     if (in->motor_fault) {
-        raise(ALARM_MOTOR_FAULT);
+        if (++s.motor_fails >= MOTOR_FAIL_LIMIT) {
+            raise(ALARM_MOTOR_FAULT);
+        }
+    } else {
+        s.motor_fails = 0;
     }
 
     /* ---- Pressure: sensor health first, then what it is telling us ----- */
