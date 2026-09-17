@@ -25,7 +25,7 @@ NFAULT_ADDR=$(nm build/rp2350-insulin-pump.elf 2>/dev/null \
               | awk '$3 == "drv8825_faulted" { print "0x" $1 }')
 if [ -z "$NFAULT_ADDR" ]; then
     echo "drv8825_faulted not found in build/rp2350-insulin-pump.elf." >&2
-    echo "Build first:  make -C build -j8" >&2
+    echo "Build first:  ./build.sh" >&2
     exit 1
 fi
 

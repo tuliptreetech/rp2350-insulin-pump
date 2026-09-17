@@ -200,9 +200,15 @@ rest is never delivered, so the dose you re-command afterwards is a fresh one.
 ## Building
 
 ```sh
-cmake -S . -B build          # RP2350, RISC-V (Hazard3) toolchain
-make -C build -j8
+./build.sh                   # RP2350, RISC-V (Hazard3) toolchain
+./build.sh --debug           # -O0 with symbols, for stepping in the emulator
+./build.sh --clean           # discard build/ and start over
 ```
+
+Use the script rather than calling cmake directly: cmake, the toolchain and the
+SDK all live under `~/.pico-sdk`, where only the Pico VS Code extension's own
+terminal puts them on PATH. `build.sh` reads the versions it needs out of
+CMakeLists.txt, so it follows that extension instead of pinning its own.
 
 ## Running it in the simulator
 
