@@ -56,6 +56,7 @@ VERIFY_MIN_FRACTION_PCT = 50       # UNDER_DELIVERY floor
 VERIFY_MIN_COMMANDED_NL = 10000    # 1.0 U before verification arms at all
 OCCLUSION_DWELL_MS = 2000
 SENSOR_FAIL_LIMIT = 10
+MOTOR_FAIL_LIMIT = 2               # consecutive samples on the nFAULT line
 
 # src/drivers/abp_pressure.c: counts = 410 at 0 psi, 3276 counts per 15 psi.
 ABP_COUNTS_ZERO = 410
@@ -686,31 +687,31 @@ def test_isolated_crc_errors_do_not_alarm(pump):
 
 
 @pytest.mark.slow
-def test_a_single_nfault_sample_does_not_latch(pump):
+def test_a_sustained_nfault_still_alarms(pump):
     """
-    nFAULT asserted for about one sensor poll, then released.
+    nFAULT held across several polls: the positive control for the debounce.
 
-    The closest analogue to Malfunction 12 in this firmware, and the one path
-    with no debounce behind it. Pressure and flow each need
-    SENSOR_FAIL_LIMIT consecutive bad samples before the firmware will call an
-    instrument broken; safety.c:139-141 raises MOTOR_FAULT from a single
-    sample of a pin.
+    This scenario used to stage a glitch of exactly one poll period and assert
+    that nothing latched. With MOTOR_FAIL_LIMIT samples of debounce on the
+    motor path that width is no longer a question anyone can answer: whether a
+    50 ms pulse covers one sample or two depends on where it lands relative to
+    the control loop, so the same test would pass or fail on phase alone.
+    Demo 9 stages the narrow case unambiguously instead, at 100 us.
 
-    Whether that asymmetry is a defect depends on whether a real DRV8825 can
-    glitch nFAULT briefly enough to land inside one control period - a hardware
-    question this scenario frames rather than answers. The failure it would
-    produce is the recall's exactly: a spurious fault detection that latches,
-    suspends basal, and takes the display with it.
+    What is worth asserting here is the other direction. A debounce that
+    rejects real faults as well as glitches is a worse defect than the one it
+    fixed, so this holds nFAULT for several consecutive polls - unambiguously a
+    fault, not a transient - and requires the alarm to fire and delivery to
+    stop.
 
-    This cannot be driven the way the other scenarios are. Asserting and
-    clearing the fault back-to-back from the host puts an unbounded amount of
-    firmware time between the two calls - tens of minutes of wall clock is
-    tens of seconds of firmware time - so the glitch would be arbitrarily wide
-    and the result would be luck in either direction. The core is paused and
-    stepped instead, which makes the width of the glitch a controlled quantity.
+    The core is paused and stepped rather than driven from the host: asserting
+    and clearing back-to-back over HTTP puts an unbounded amount of firmware
+    time between the two calls, so the width would be luck rather than a
+    controlled quantity.
     """
     ticks_per_ms = SYS_CLOCK_KHZ
-    glitch_ticks = SENSOR_POLL_MS * ticks_per_ms
+    held_polls = MOTOR_FAIL_LIMIT + 1
+    glitch_ticks = held_polls * SENSOR_POLL_MS * ticks_per_ms
     calibration_ms = 500
 
     pump.start_delivery()
@@ -746,31 +747,33 @@ def test_a_single_nfault_sample_does_not_latch(pump):
         pump.m.go()
 
     # --- the scenario really staged -------------------------------------
-    # Not asserted from telemetry: it is 4 Hz, and a 50 ms glitch cannot appear
-    # in it. The driver model's own view is the only witness at this width.
+    # Not asserted from telemetry: it is 4 Hz, and a pulse this short cannot
+    # appear in it. The driver model's own view is the only witness.
     assert faulted_status != healthy_status, (
         f"the stepper model reported the same status faulted as healthy "
         f"({healthy_status!r}), so nFAULT was never actually asserted"
     )
 
-    released = pump.wait_for(lambda t: t["nfault"] == 0,
-                             "nFAULT to read released again")
-
     # --- the requirement -------------------------------------------------
-    held, last = quiet(pump, "a one-sample nFAULT glitch")
-    if not held:
-        pytest.xfail(
-            f"nFAULT was asserted for about {SENSOR_POLL_MS} ms of firmware "
-            f"time - roughly one sensor poll - and released, and the pump "
-            f"latched {alarm_names(last['alarms'])} and suspended "
-            f"(mode={MODES[last['mode']]}). safety.c:139-141 raises "
-            f"MOTOR_FAULT from a single sample while the pressure and flow "
-            f"paths both require {SENSOR_FAIL_LIMIT} consecutive. Whether the "
-            f"DRV8825 can glitch this briefly is a hardware question; that the "
-            f"firmware cannot tell a glitch from a fault is not."
-        )
+    # A debounce that swallowed real faults would be a worse defect than the
+    # single-sample latch it replaced, so this is a hard assertion rather than
+    # an xfail: the firmware is required to meet it.
+    last = pump.wait_for(
+        lambda t: t["alarms"] or t["mode"] != 1,
+        f"MOTOR_FAULT after nFAULT was held for {held_polls} polls",
+        timeout_s=wall(4))
 
-    assert released["nfault"] == 0, "nFAULT never released"
+    assert "MOTOR_FAULT" in alarm_names(last["alarms"]), (
+        f"nFAULT was held for {held_polls} consecutive polls "
+        f"({held_polls * SENSOR_POLL_MS} ms) and the pump raised "
+        f"{alarm_names(last['alarms'])} instead of MOTOR_FAULT. The debounce "
+        f"at MOTOR_FAIL_LIMIT={MOTOR_FAIL_LIMIT} is rejecting real faults, "
+        f"not just glitches."
+    )
+    assert last["mode"] == 2, (
+        f"MOTOR_FAULT was raised but the pump kept delivering, "
+        f"mode={MODES[last['mode']]}"
+    )
 
 
 # ===========================================================================
