@@ -61,6 +61,12 @@ SENSOR_POLL_MS = 50            # CONTROL_PERIOD_US in src/main.c
 GLITCH_US = 100
 GLITCH_TICKS = GLITCH_US * (SYS_CLOCK_KHZ // 1000)
 
+# How much firmware time to watch after the glitch before calling it rejected.
+# An alarm raised by the glitch shows up in the telemetry record right after
+# it - 250 ms of firmware time - so this is an order of magnitude of margin,
+# and it is the whole assertion when the firmware behaves correctly.
+WATCH_MS = 2000
+
 ALARMS = ["MOTOR_FAULT", "OCCLUSION", "AIR_IN_LINE", "UNDER_DELIVERY",
           "PRESSURE_SENSOR", "FLOW_SENSOR", "RESERVOIR_EMPTY", "HOUR_LIMIT",
           "RESERVOIR_LOW"]
@@ -227,23 +233,48 @@ with EmulatorController(HOST).connect() as conn:
             sys.exit("\n  The pin had not settled by the sample, so nothing was "
                      "staged.\n  Widen GLITCH_US and run again.")
 
+        # Watch a window rather than waiting for a reaction. "No alarm" is a
+        # legitimate - and after the motor-path debounce, the expected -
+        # outcome, and a wait that can only end on an alarm would report the
+        # correct behaviour as a timeout.
         print()
-        say("waiting", "for the next telemetry record...")
-        after = wait_for(m, lambda t: t["alarms"] or int(t["mode"]) != 1,
-                         "the pump to react", timeout_s=120)
+        say("watching", "%d ms of firmware time for a reaction..." % WATCH_MS)
+        glitched_at = int(before["t"])
+        deadline = time.time() + 300
+        worst = before
+        while time.time() < deadline:
+            rec = telemetry(m)
+            if rec and (rec["alarms"] or int(rec["mode"]) != 1):
+                worst = rec
+                break
+            if rec and int(rec["t"]) - glitched_at >= WATCH_MS:
+                worst = rec
+                break
+            time.sleep(0.5)
+
+        alarmed = bool(worst["alarms"]) or int(worst["mode"]) != 1
         print()
-        say("pump after", describe(after))
+        say("pump after", describe(worst))
         print()
-        if after["alarms"] and after["nfault"] == "0":
+        if alarmed and worst["nfault"] == "0":
             print("  The pump has suspended insulin delivery for a motor fault.")
             print("  The same record reports nfault=0: there is no motor fault,")
             print("  and there was one for %.1f us. It appears nowhere in the log."
                   % width_us)
             print()
-            print("  safety.c:139-141 raises MOTOR_FAULT from a single sample.")
+            print("  safety.c raises MOTOR_FAULT from a single sample of the pin.")
             print("  The pressure and flow paths each require ten consecutive.")
-        elif not after["alarms"]:
-            print("  The pump rejected the glitch - the motor path has a debounce.")
+        elif alarmed:
+            print("  The pump alarmed, but not for the motor - something else")
+            print("  happened during this run and it says nothing about the glitch.")
+        else:
+            print("  The pump kept delivering. A %.1f us assertion of nFAULT landed"
+                  % width_us)
+            print("  on a sensor poll and was rejected: the motor path takes a")
+            print("  second look before it believes the pin, so a transient no")
+            print("  longer suspends insulin delivery.")
+            print()
+            print("  Held for %d ms of firmware time with alarms=0x000." % WATCH_MS)
         print()
 PYEOF
 
