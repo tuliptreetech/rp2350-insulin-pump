@@ -56,7 +56,7 @@ HOST = "http://localhost:10314"
 CPU = "/Hazard3Cpu"
 STEPPER = "/MEM/stepper"
 
-SYS_CLOCK_KHZ = 48000          # src/board.h
+SYS_CLOCK_KHZ = 150000          # src/board.h
 SENSOR_POLL_MS = 50            # CONTROL_PERIOD_US in src/main.c
 GLITCH_US = 100
 GLITCH_TICKS = GLITCH_US * (SYS_CLOCK_KHZ // 1000)

@@ -61,9 +61,9 @@ SENSOR_FAIL_LIMIT = 10
 ABP_COUNTS_ZERO = 410
 ABP_COUNTS_PER_MILLIPSI = 3276 / 15000.0
 
-# src/board.h: 20 Hz sensor polling, 48 MHz clk_sys.
+# src/board.h: 20 Hz sensor polling, 150 MHz clk_sys.
 SENSOR_POLL_MS = 50
-SYS_CLOCK_KHZ = 48000
+SYS_CLOCK_KHZ = 150000
 
 MICROSTEPS_PER_UNIT = 200          # 1.000 U / 5 mU per microstep
 
